@@ -201,7 +201,9 @@ const COLORS = { wrist: "#ff4d4d", elbow: "#ffd23f", shoulder: "#3ddc97", index:
 const FALLBACK_MODELS = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.5-pro"];
 
 // ---- 狀態(全部只在記憶體)----
-let pose = null, hand = null, tsBase = 0;
+let pose = null, hand = null, handRoi = null, tsBase = 0;
+const roiCanvas = document.createElement("canvas"); roiCanvas.width = roiCanvas.height = 384;   // 放大手部用的暫存畫布
+const roiCtx = roiCanvas.getContext("2d");
 let samples = [];          // {t, pose:[[x,y,v]...]|null, hand:[[x,y]...]|null}
 let trails = {};           // key -> [{x,y}|null] (像素座標,已平滑)
 let metrics = null;
@@ -232,7 +234,10 @@ async function ensureModels() {
   };
   pose = await make(PoseLandmarker, POSE_MODELS[want], { numPoses: 1 });
   poseKey = want;
-  if (!hand) hand = await make(HandLandmarker, HAND_MODEL, { numHands: 2 });
+  if (!hand) hand = await make(HandLandmarker, HAND_MODEL, { numHands: 2, minHandDetectionConfidence: 0.3 });
+  // 放大手部:手在畫面中只有三、四十像素時,整張畫面偵測很難抓到。裁出手腕附近一小塊放大再偵測,
+  // 每次裁切位置都不同,不是連續影像,所以用 IMAGE 模式
+  if (!handRoi) handRoi = await make(HandLandmarker, HAND_MODEL, { numHands: 1, runningMode: "IMAGE", minHandDetectionConfidence: 0.3 });
 }
 
 // ---- 影片載入 ----
@@ -300,6 +305,17 @@ const nextFrame = () => document.hidden ? Promise.resolve() : new Promise(r => {
   requestAnimationFrame(() => { clearTimeout(t); r(); });
 });
 
+// 以姿勢模型估的手腕為中心裁一塊(約 1.2 倍軀幹長),放大到 384×384 後偵測手部,座標換回整張畫面的 0~1
+function zoomHand(pl, wi) {
+  const W = cv.width, H = cv.height;
+  const torso = Math.hypot(((pl[11].x + pl[12].x) / 2 - (pl[23].x + pl[24].x) / 2) * W, ((pl[11].y + pl[12].y) / 2 - (pl[23].y + pl[24].y) / 2) * H);
+  const S = Math.round(Math.min(W, H, Math.max(160, 1.2 * (torso || 0.22 * H))));
+  const x0 = Math.max(0, Math.min(W - S, pl[wi].x * W - S / 2)), y0 = Math.max(0, Math.min(H - S, pl[wi].y * H - S / 2));
+  roiCtx.drawImage(video, x0, y0, S, S, 0, 0, 384, 384);
+  const r = handRoi.detect(roiCanvas);
+  return r.landmarks.length ? r.landmarks[0].map(p => [(x0 + p.x * S) / W, (y0 + p.y * S) / H]) : null;
+}
+
 // ---- 分析 ----
 $("analyze").addEventListener("click", async () => {
   if (analyzing) return;
@@ -325,11 +341,14 @@ $("analyze").addEventListener("click", async () => {
       const ts = tsBase + Math.round(t * 1000);
       const pr = pose.detectForVideo(video, ts);
       const hr = hand.detectForVideo(video, ts);
-      out.push({
-        t,
-        pose: pr.landmarks[0] ? pr.landmarks[0].map(p => [p.x, p.y, p.visibility ?? 1]) : null,
-        hand: hr.landmarks.map(h => h.map(p => [p.x, p.y])),
-      });
+      const hands = hr.landmarks.map(h => h.map(p => [p.x, p.y]));
+      const pl = pr.landmarks[0];
+      if (pl) for (const wi of [16, 15]) {                           // 右、左手腕
+        if (hands.some(h => Math.hypot(h[0][0] - pl[wi].x, h[0][1] - pl[wi].y) < 0.12)) continue;   // 已經抓到了
+        const h = zoomHand(pl, wi);
+        if (h) hands.push(h);
+      }
+      out.push({ t, pose: pl ? pl.map(p => [p.x, p.y, p.visibility ?? 1]) : null, hand: hands });
       $("prog").value = (i + 1) / n;
       if (i % 5 === 0) {
         const left = Math.round((performance.now() - t0) / (i + 1) * (n - i - 1) / 1000);
@@ -340,7 +359,8 @@ $("analyze").addEventListener("click", async () => {
     buildTrails();
     buildMetrics();
     const rate = metrics ? Math.round(metrics.偵測成功率 * 100) : 0;
-    setStatus("st1", `分析完成:${n} 幀(${fps} fps),姿勢偵測成功率 ${rate}%。`);
+    const handRate = Math.round(100 * samples.filter(x => x.pose && pickHand(x, x.pose[armIdx().wrist])).length / n);
+    setStatus("st1", `分析完成:${n} 幀(${fps} fps),姿勢偵測成功率 ${rate}%,投擲手的手部偵測 ${handRate}%。`);
     renderWarn();
     $("play").disabled = false; $("export").disabled = false; $("seek").disabled = false;
     updateAdviseBtn();
@@ -396,9 +416,9 @@ function pickHand(s, wristNorm) {
 function keyPoint(s, key) {
   if (!s.pose) return null;
   const ix = armIdx(), p = s.pose[ix[key] ?? 0];
-  if (key === "index") {
+  if (key === "index" || key === "wrist") {
     const h = pickHand(s, s.pose[ix.wrist]);
-    if (h) return { x: h[8][0] * cv.width, y: h[8][1] * cv.height };
+    if (h) { const q = key === "index" ? h[8] : h[0]; return { x: q[0] * cv.width, y: q[1] * cv.height }; }
   }
   if (p[2] < VIS_MIN) return null;
   return { x: p[0] * cv.width, y: p[1] * cv.height };
@@ -528,7 +548,8 @@ function buildTrails() {
   bone = $("boneMode").value === "off" ? { okT: null, okU: null, okF: null } : boneMask($("boneMode").value);
   const gate = { shoulder: bone.okT, elbow: bone.okU, wrist: bone.okF, index: bone.okF };
   for (const k of ["wrist", "elbow", "shoulder", "index"]) {
-    let pts = samples.map((s, i) => (gate[k] && !gate[k][i] ? null : keyPoint(s, k)));
+    const handKey = k === "wrist" || k === "index";   // 手部模型也看到手 = 獨立佐證,不被骨長閘門丟掉
+    let pts = samples.map((s, i) => (gate[k] && !gate[k][i] && !(handKey && s.pose && pickHand(s, s.pose[armIdx().wrist])) ? null : keyPoint(s, k)));
     // 視窗以「時間」定義,不同 fps 行為一致。只補約 0.1 秒內(約 3 幀)的小缺口;
     // 沒追蹤到的地方保持空白(不內插、不畫線),太短的零碎片段(< 約 0.1 秒)也視為雜訊丟掉
     if (strength > 0) pts = euroSmooth(fillGaps(removeOutliers(pts, sw, Math.max(3, Math.round(fps * 0.1))), Math.max(1, Math.round(fps * 0.1))), ts, sw, strength);
