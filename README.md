@@ -14,6 +14,8 @@
 - 拍攝品質提醒(偵測率低、人物太靠邊、太小、投擲手被擋住…)
 - Gemini 教練建議:白話、不用專業術語、附對應的練習方式
 
+線上版:https://motion-trace.duckdns.org/
+
 ## 快速開始
 
 ```bash
@@ -69,6 +71,14 @@ python3 -m http.server 8000
 - [MediaPipe Tasks Vision](https://developers.google.com/mediapipe)(`@mediapipe/tasks-vision` 0.10.14,CDN 載入)
 - Canvas 2D 繪圖、`MediaRecorder` 匯出
 - Google Gemini API(`generateContent`,使用者自帶 key)
+
+## 部署
+
+```bash
+./deploy.sh   # scp index.html 到 ssh 主機 focus 的 ~/caddy/motion-trace/
+```
+
+站台設定在 Caddy repo 的 `sites/motion-trace.caddy`。細節見 [`doc/worklog.md`](doc/worklog.md) §3.1。
 
 ## 開發/交接
 

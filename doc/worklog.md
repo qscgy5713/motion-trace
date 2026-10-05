@@ -25,6 +25,7 @@
 | `index.html` | 全部程式碼 |
 | `README.md` | 使用說明 |
 | `doc/worklog.md` | 本檔 |
+| `deploy.sh` | 上傳 `index.html` 到線上主機 |
 
 - 目前所有改動都已 commit 並推到 `origin/master`;最後一次 commit:`113e85b`。
 - commit 歷史:
@@ -34,6 +35,15 @@
   - `5fd79f0`:更新本檔 git 狀態
   - `113e85b`:手部放大追蹤(全畫面沒抓到手時裁切放大再偵測、手部點取代姿勢手腕、手部佐證繞過骨長閘門)
 - 之後若再有修改,請先問使用者再 commit / push(見 §2)。
+
+## 3.1 部署
+
+- 線上網址:**https://motion-trace.duckdns.org/**(純靜態,由 GCP VM 上共用的 Caddy 提供,憑證自動申請/續期)。
+- VM:ssh 別名 `focus`(`35.253.140.113`,instance `instance-20260930-051826`);Caddy 容器 `shop-caddy-1`,綁定 `~/caddy` → 容器 `/etc/caddy`(唯讀)。
+- **更新網頁**:`./deploy.sh`(scp `index.html` 到 `focus:~/caddy/motion-trace/`),Caddy 立刻提供新版,不需要 reload。
+- 站台設定在另一個 repo:`/Users/yujuchen/www/Caddy/sites/motion-trace.caddy`;改設定要在那個 repo 執行 `./deploy.sh`(會驗證、平滑 reload,失敗自動還原)。Caddy 的 deploy 只換 `Caddyfile` 與 `sites/`,不會動 `~/caddy/motion-trace/`。
+- 注意:這台 VM 同時跑 shop 專案(chatonspace),改 Caddy 設定前後請確認 `https://chatonspace.duckdns.org/` 與 `admin.` 仍是 200。
+- 部署紀錄:2026-10-05 首次部署,驗證 HTTP/2 200、HTTP 自動 308 轉 HTTPS、標題正確、商店網域不受影響。
 
 ## 4. 程式架構(`index.html`)
 
