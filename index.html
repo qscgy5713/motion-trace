@@ -1,0 +1,764 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Motion Trace 動作軌跡分析</title>
+<style>
+  :root {
+    --bg: #0f1115; --panel: #181b22; --line: #2a2f3a; --text: #e8eaf0; --muted: #9aa3b2;
+    --accent: #4da3ff; --ok: #3ddc97; --warn: #ffd23f; --bad: #ff4d4d;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.6 -apple-system, "Noto Sans TC", "PingFang TC", sans-serif; }
+  main { max-width: 900px; margin: 0 auto; padding: 16px; display: grid; gap: 16px; }
+  h1 { font-size: 20px; margin: 4px 0 0; }
+  h2 { font-size: 16px; margin: 0 0 12px; }
+  .sub { color: var(--muted); font-size: 13px; margin: 0; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .row { display: flex; flex-wrap: wrap; gap: 10px; align-items: center; margin: 8px 0; }
+  label { display: flex; align-items: center; gap: 6px; font-size: 14px; color: var(--muted); }
+  label.col { flex-direction: column; align-items: stretch; flex: 1 1 200px; }
+  input[type=text], input[type=password], select, textarea {
+    background: #0f1115; color: var(--text); border: 1px solid var(--line); border-radius: 8px;
+    padding: 8px 10px; font: inherit; width: 100%;
+  }
+  textarea { resize: vertical; min-height: 60px; }
+  button {
+    background: var(--accent); color: #04121f; border: 0; border-radius: 8px; padding: 9px 14px;
+    font: inherit; font-weight: 600; cursor: pointer;
+  }
+  button.ghost { background: transparent; color: var(--text); border: 1px solid var(--line); }
+  button:disabled { opacity: .45; cursor: not-allowed; }
+  .stage { position: relative; background: #000; border-radius: 8px; overflow: hidden; }
+  .stage { max-width: 480px; margin: 0 auto; }
+  canvas { display: block; width: auto; height: auto; max-width: 100%; max-height: 50vh; margin: 0 auto; }
+  #seek { max-width: 480px; display: block; margin: 0 auto; }
+  .empty { padding: 48px 16px; text-align: center; color: var(--muted); }
+  input[type=range] { width: 100%; }
+  progress { width: 100%; height: 8px; }
+  .status { color: var(--muted); font-size: 13px; min-height: 20px; }
+  .status.err { color: var(--bad); }
+  .warn { border: 1px solid var(--warn); border-radius: 8px; padding: 8px 12px; margin: 8px 0; font-size: 13px; color: var(--warn); }
+  .warn ul { margin: 4px 0 0; padding-left: 20px; }
+  .chips { display: flex; flex-wrap: wrap; gap: 8px; }
+  .chips label { background: #0f1115; border: 1px solid var(--line); border-radius: 999px; padding: 4px 10px; color: var(--text); }
+  .dot { width: 10px; height: 10px; border-radius: 50%; display: inline-block; }
+  .note { font-size: 12px; color: var(--muted); }
+  #advice { line-height: 1.75; }
+  #advice h3, #advice h4 { margin: 18px 0 6px; font-size: 16px; color: var(--accent); }
+  #advice ul, #advice ol { padding-left: 22px; margin: 6px 0; }
+  #advice code { background: #0f1115; padding: 1px 5px; border-radius: 4px; }
+  #frames { display: flex; gap: 8px; overflow-x: auto; margin-top: 10px; }
+  #frames img { height: 90px; border-radius: 6px; border: 1px solid var(--line); }
+  details { margin-top: 10px; }
+  details pre { background: #0f1115; padding: 10px; border-radius: 8px; overflow: auto; font-size: 12px; max-height: 260px; }
+</style>
+</head>
+<body>
+<main>
+  <div>
+    <h1>Motion Trace 動作軌跡分析</h1>
+    <p class="sub">上傳投擲影片 → 骨架與關節軌跡 → 慢動作 → Gemini 給出修改建議。影片只在瀏覽器本機處理,不會上傳。</p>
+  </div>
+
+  <section>
+    <h2>1. 載入影片並分析</h2>
+    <div class="row">
+      <input type="file" id="file" accept="video/*">
+    </div>
+    <div class="row">
+      <label>投擲手
+        <select id="arm"><option value="right">右手</option><option value="left">左手</option></select>
+      </label>
+      <label>取樣頻率
+        <select id="fps">
+          <option value="auto" selected>自動(依影片實際幀率)</option>
+          <option value="20">20 fps(快)</option>
+          <option value="30">30 fps</option>
+          <option value="60">60 fps(準、慢)</option>
+          <option value="120">120 fps(最準、最慢,適合慢動作影片)</option>
+        </select>
+      </label>
+      <button id="analyze" disabled>開始分析</button>
+      <button id="cancel" class="ghost" hidden>取消</button>
+    </div>
+    <progress id="prog" value="0" max="1" hidden></progress>
+    <div class="warn" id="warn" hidden></div>
+    <div class="status" id="st1">請選擇影片。建議側面或斜後方拍攝、全身入鏡、鏡頭固定;高 fps 慢動作影片追蹤更準。</div>
+  </section>
+
+  <section>
+    <h2>2. 檢視結果</h2>
+    <div class="stage">
+      <canvas id="cv" width="640" height="360" hidden></canvas>
+      <div class="empty" id="emptyMsg">尚未載入影片</div>
+    </div>
+    <video id="video" muted playsinline preload="auto" style="position:absolute;opacity:0;pointer-events:none;width:1px;height:1px"></video>
+    <div class="row">
+      <button id="play" class="ghost" disabled>播放</button>
+      <label>速度
+        <select id="rate" style="width:auto">
+          <option value="1">1×</option><option value="0.5" selected>0.5×</option><option value="0.25">0.25×</option>
+        </select>
+      </label>
+      <button id="export" class="ghost" disabled>匯出疊圖影片</button>
+    </div>
+    <input type="range" id="seek" min="0" max="1000" value="0" disabled>
+    <div class="chips" style="margin-top:10px">
+      <label><input type="checkbox" id="tSkel" checked> 骨架/軀幹</label>
+      <label><input type="checkbox" id="tWrist" checked> <span class="dot" style="background:#ff4d4d"></span> 手腕</label>
+      <label><input type="checkbox" id="tElbow" checked> <span class="dot" style="background:#ffd23f"></span> 手肘</label>
+      <label><input type="checkbox" id="tShoulder"> <span class="dot" style="background:#3ddc97"></span> 肩膀</label>
+      <label><input type="checkbox" id="tIndex"> <span class="dot" style="background:#4da3ff"></span> 食指</label>
+      <label><input type="checkbox" id="tGrid"> 網格</label>
+      <label><input type="checkbox" id="tRef"> 參考線</label>
+      <label>軌跡長度
+        <select id="trailLen" style="width:auto">
+          <option value="0.5">最近 0.5 秒</option><option value="1" selected>最近 1 秒</option>
+          <option value="2">最近 2 秒</option><option value="all">全部</option>
+        </select>
+      </label>
+    </div>
+    <div class="row">
+      <label style="flex:1 1 260px">平滑強度
+        <input type="range" id="smooth" min="0" max="10" step="1" value="5">
+        <span id="smoothVal" style="min-width:3.5em">5</span>
+      </label>
+    </div>
+    <div class="note">0 = 原始資料;數字越大軌跡越平順(同時會自動剔除突然跳掉的離群點)。強度太高會把真正的快速動作磨平。</div>
+    <div class="status" id="st2"></div>
+  </section>
+
+  <section>
+    <h2>3. Gemini 投擲建議</h2>
+    <div class="row">
+      <label class="col">Gemini API Key(只存在本頁記憶體,重新整理就消失)
+        <input type="password" id="key" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="貼上 API Key">
+      </label>
+      <label class="col">模型
+        <select id="model"></select>
+      </label>
+      <button id="loadModels" class="ghost" disabled>載入可用模型</button>
+    </div>
+    <div class="row">
+      <label class="col">運動/動作
+        <input type="text" id="sport" value="飛鏢投擲">
+      </label>
+      <label class="col">拍攝角度
+        <select id="angle">
+          <option value="側面">側面</option>
+          <option value="斜後方">斜後方</option>
+          <option value="正面">正面</option>
+          <option value="不確定">不確定</option>
+        </select>
+      </label>
+    </div>
+    <label class="col" style="margin:8px 0">補充說明(選填:程度、困擾、想改善的目標)
+      <textarea id="ctx" placeholder="例:練 1 年,出手後常偏低,覺得手肘不穩"></textarea>
+    </label>
+    <div class="row">
+      <button id="advise" disabled>產生分析與建議</button>
+    </div>
+    <div class="status" id="st3">請先完成分析,並填入 API Key。</div>
+    <div id="frames"></div>
+    <div id="advice"></div>
+    <details id="metricsBox" hidden><summary class="note">送給 Gemini 的量化數據</summary><pre id="metricsPre"></pre></details>
+    <p class="note">AI 建議僅供參考:姿勢辨識有誤差,尤其是手指與高速出手瞬間。API Key 只會直接送到 Google,不經過其他伺服器。</p>
+  </section>
+</main>
+
+<script type="module">
+import { PoseLandmarker, HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+
+const $ = id => document.getElementById(id);
+const video = $("video"), cv = $("cv"), ctx = cv.getContext("2d");
+const WASM = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
+const POSE_MODEL = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_full/float16/latest/pose_landmarker_full.task";
+const HAND_MODEL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task";
+const GEMINI = "https://generativelanguage.googleapis.com/v1beta";
+const COLORS = { wrist: "#ff4d4d", elbow: "#ffd23f", shoulder: "#3ddc97", index: "#4da3ff" };
+const FALLBACK_MODELS = ["gemini-3.7-flash", "gemini-3.6-flash", "gemini-3.5-flash", "gemini-2.5-flash", "gemini-2.5-pro"];
+
+// ---- 狀態(全部只在記憶體)----
+let pose = null, hand = null, tsBase = 0;
+let samples = [];          // {t, pose:[[x,y,v]...]|null, hand:[[x,y]...]|null}
+let trails = {};           // key -> [{x,y}|null] (像素座標,已平滑)
+let metrics = null;
+let objectUrl = null, analyzing = false, cancelRequested = false, exporting = false;
+let videoFps = null, fpsNote = "";   // 影片實際幀率(估算);取樣頻率被自動調降時的說明
+
+const setStatus = (id, msg, err = false) => { const e = $(id); e.textContent = msg; e.classList.toggle("err", err); };
+const armIdx = () => $("arm").value === "right"
+  ? { shoulder: 12, elbow: 14, wrist: 16, index: 20, hip: 24, oShoulder: 11, oHip: 23 }
+  : { shoulder: 11, elbow: 13, wrist: 15, index: 19, hip: 23, oShoulder: 12, oHip: 24 };
+
+// ---- 模型載入 ----
+async function ensureModels() {
+  if (pose && hand) return;
+  setStatus("st1", "載入姿勢辨識模型中(首次約數 MB)…");
+  const fileset = await FilesetResolver.forVisionTasks(WASM);
+  const make = async (Cls, path, extra) => {
+    for (const delegate of ["GPU", "CPU"]) {
+      try {
+        return await Cls.createFromOptions(fileset, {
+          baseOptions: { modelAssetPath: path, delegate }, runningMode: "VIDEO", ...extra,
+        });
+      } catch (e) { if (delegate === "CPU") throw e; }
+    }
+  };
+  pose = await make(PoseLandmarker, POSE_MODEL, { numPoses: 1 });
+  hand = await make(HandLandmarker, HAND_MODEL, { numHands: 2 });
+}
+
+// ---- 影片載入 ----
+$("file").addEventListener("change", e => {
+  const f = e.target.files[0];
+  if (!f) return;
+  if (objectUrl) URL.revokeObjectURL(objectUrl);
+  objectUrl = URL.createObjectURL(f);
+  video.src = objectUrl;
+  samples = []; trails = {}; metrics = null;
+  $("advise").disabled = true; $("play").disabled = true; $("export").disabled = true; $("seek").disabled = true;
+  videoFps = null; fpsNote = ""; renderWarn();
+  video.onloadedmetadata = async () => {
+    cv.width = video.videoWidth; cv.height = video.videoHeight;
+    cv.hidden = false; $("emptyMsg").hidden = true;
+    const info = `${video.videoWidth}×${video.videoHeight},${video.duration.toFixed(1)} 秒`;
+    setStatus("st1", `已載入:${info}。偵測影片實際幀率中…`);
+    $("analyze").disabled = true;
+    await seekTo(0); draw();
+    const src = objectUrl;
+    const est = await estimateFps();
+    if (src !== objectUrl) return;                 // 偵測期間又換了影片
+    videoFps = est;
+    await seekTo(0); draw();
+    $("analyze").disabled = false;
+    setStatus("st1", `已載入:${info}${est ? `,實際幀率約 ${Math.round(est)} fps` : ""}。按「開始分析」。`);
+  };
+  video.onerror = () => setStatus("st1", "這個影片格式瀏覽器無法播放,請換成 mp4/mov(H.264)。", true);
+});
+
+const seekTo = t => new Promise(res => {
+  t = Math.max(0, Math.min(t, video.duration - 0.001));
+  if (Math.abs(video.currentTime - t) < 1e-4) return res();
+  const done = () => { clearTimeout(timer); video.removeEventListener("seeked", done); res(); };
+  const timer = setTimeout(done, 3000);          // 保險:seeked 沒觸發也不要永遠卡住
+  video.addEventListener("seeked", done);
+  video.currentTime = t;
+});
+// 實際幀率:容器標示的 fps 不可靠(例如標 120 實際 30),所以真的播放約 40 幀,用「幀間隔中位數」估算。
+// 背景分頁不會觸發 requestVideoFrameCallback,逾時就回傳 null(不限制取樣頻率)
+function estimateFps() {
+  return new Promise(resolve => {
+    if (!("requestVideoFrameCallback" in video)) return resolve(null);
+    const times = []; let done = false;
+    const finish = () => {
+      if (done) return; done = true; clearTimeout(guard); video.pause();
+      const d = [];
+      for (let i = 1; i < times.length; i++) if (times[i] > times[i - 1]) d.push(times[i] - times[i - 1]);
+      resolve(d.length >= 5 ? 1 / median(d) : null);
+    };
+    const guard = setTimeout(finish, 2500);
+    const tick = (_, md) => {
+      times.push(md.mediaTime);
+      if (times.length >= 40 || md.mediaTime > 1.5) finish(); else video.requestVideoFrameCallback(tick);
+    };
+    video.playbackRate = 1;
+    video.requestVideoFrameCallback(tick);
+    video.play().catch(finish);
+  });
+}
+
+// 等瀏覽器把這一幀畫出來。背景分頁的 rAF 會被暫停,所以背景時直接略過、前景時 rAF 最多等 50ms
+const nextFrame = () => document.hidden ? Promise.resolve() : new Promise(r => {
+  const t = setTimeout(r, 50);
+  requestAnimationFrame(() => { clearTimeout(t); r(); });
+});
+
+// ---- 分析 ----
+$("analyze").addEventListener("click", async () => {
+  if (analyzing) return;
+  analyzing = true; cancelRequested = false;
+  $("analyze").disabled = true; $("cancel").hidden = false; $("prog").hidden = false;
+  video.pause();
+  try {
+    await ensureModels();
+    const dur = video.duration, vf = videoFps ? Math.round(videoFps) : null, sel = $("fps").value;
+    let fps = sel === "auto" ? Math.min(120, vf || 30) : +sel;
+    fpsNote = "";
+    if (vf && fps > vf) {                       // 取樣頻率高過影片實際幀率只會重複分析同一幀
+      fpsNote = `影片實際只有約 ${vf} fps,取樣頻率已自動從 ${fps} 降為 ${vf} fps(再高只是重複分析同一幀)。`;
+      fps = vf;
+    }
+    const n = Math.max(1, Math.floor(dur * fps));
+    const out = [], t0 = performance.now();
+    for (let i = 0; i < n; i++) {
+      if (cancelRequested) throw new Error("已取消");
+      const t = i / fps;
+      await seekTo(t);
+      await nextFrame();
+      const ts = tsBase + Math.round(t * 1000);
+      const pr = pose.detectForVideo(video, ts);
+      const hr = hand.detectForVideo(video, ts);
+      out.push({
+        t,
+        pose: pr.landmarks[0] ? pr.landmarks[0].map(p => [p.x, p.y, p.visibility ?? 1]) : null,
+        hand: hr.landmarks.map(h => h.map(p => [p.x, p.y])),
+      });
+      $("prog").value = (i + 1) / n;
+      if (i % 5 === 0) {
+        const left = Math.round((performance.now() - t0) / (i + 1) * (n - i - 1) / 1000);
+        setStatus("st1", `分析中 ${i + 1}/${n} 幀,預估剩餘約 ${left} 秒…`);
+      }
+    }
+    samples = out;
+    buildTrails();
+    buildMetrics();
+    const rate = metrics ? Math.round(metrics.偵測成功率 * 100) : 0;
+    setStatus("st1", `分析完成:${n} 幀(${fps} fps),姿勢偵測成功率 ${rate}%。`);
+    renderWarn();
+    $("play").disabled = false; $("export").disabled = false; $("seek").disabled = false;
+    updateAdviseBtn();
+    await seekTo(0); draw();
+  } catch (e) {
+    setStatus("st1", "分析失敗:" + e.message, e.message !== "已取消");
+  } finally {
+    tsBase += Math.round(video.duration * 1000) + 1000;   // 取消/失敗也要推進,否則下次時間戳會倒退
+    analyzing = false; $("analyze").disabled = false; $("cancel").hidden = true; $("prog").hidden = true;
+  }
+});
+$("cancel").addEventListener("click", () => { cancelRequested = true; });
+
+// ---- 拍攝品質診斷 ----
+function diagnose() {
+  const w = [], N = samples.length;
+  if (!N) return w;
+  const withPose = samples.filter(s => s.pose), rate = withPose.length / N;
+  if (rate < 0.7) w.push(`姿勢偵測成功率只有 ${Math.round(rate * 100)}%,追蹤結果不可靠。請全身完整入鏡、光線充足、背景單純。`);
+  if (withPose.length < 5) return w;
+
+  const torso = [11, 12, 23, 24];
+  const cx = median(withPose.map(s => torso.reduce((a, i) => a + s.pose[i][0], 0) / 4));
+  const clipped = withPose.filter(s => torso.some(i => s.pose[i][0] < 0.03 || s.pose[i][0] > 0.97 || s.pose[i][1] > 0.98)).length / withPose.length;
+  if (cx < 0.25 || cx > 0.75 || clipped > 0.25) w.push("人物太靠畫面邊緣或被切到,請讓人物置中、全身完整入鏡。");
+
+  const torsoRatio = 2 * bodyUnit() / cv.height;
+  if (torsoRatio < 0.1) w.push(`人物在畫面中太小(軀幹只佔畫面高度 ${Math.round(torsoRatio * 100)}%),請靠近一些,讓人物至少佔畫面高度一半。`);
+
+  const vis = idx => withPose.filter(s => s.pose[idx][2] >= 0.2).length / N;
+  const right = $("arm").value === "right", mine = vis(right ? 16 : 15), other = vis(right ? 15 : 16);
+  if (mine < 0.5) {
+    w.push(`投擲手(${right ? "右" : "左"}手)手腕只有 ${Math.round(mine * 100)}% 的幀可見,可能被身體遮住或出鏡。` +
+      (other > mine + 0.2 ? "另一側手腕可見度明顯較高,請確認「投擲手」有沒有選錯。" : "請換個角度拍(側面或斜後 45 度),避免被身體擋住。"));
+  }
+  return w;
+}
+function renderWarn() {
+  const list = [fpsNote, ...diagnose()].filter(Boolean), el = $("warn");
+  el.hidden = !list.length;
+  el.innerHTML = list.length ? "<strong>拍攝/分析提醒</strong><ul>" + list.map(t => `<li>${t.replace(/&/g, "&amp;").replace(/</g, "&lt;")}</li>`).join("") + "</ul>" : "";
+}
+
+// ---- 軌跡與數據 ----
+function pickHand(s, wristNorm) {
+  let best = null, bd = 0.12;
+  for (const h of s.hand || []) {
+    const d = Math.hypot(h[0][0] - wristNorm[0], h[0][1] - wristNorm[1]);
+    if (d < bd) { bd = d; best = h; }
+  }
+  return best;
+}
+function keyPoint(s, key) {
+  if (!s.pose) return null;
+  const ix = armIdx(), p = s.pose[ix[key] ?? 0];
+  if (key === "index") {
+    const h = pickHand(s, s.pose[ix.wrist]);
+    if (h) return { x: h[8][0] * cv.width, y: h[8][1] * cv.height };
+  }
+  if (p[2] < 0.2) return null;
+  return { x: p[0] * cv.width, y: p[1] * cv.height };
+}
+const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
+const median = a => { const s = [...a].sort((x, y) => x - y); return s.length ? s[s.length >> 1] : 0; };
+
+// 「人體單位」(像素):軀幹長(肩線中點→髖線中點)的一半,正面時約等於肩寬。
+// 不直接用肩寬:側面拍攝時兩肩重疊,肩寬會縮成正面的 1/4,所有以它為尺度的門檻和速度都會失真
+function bodyUnit() {
+  const W = cv.width, H = cv.height, L = [];
+  for (const s of samples) {
+    const p = s.pose;
+    if (!p || [11, 12, 23, 24].some(i => p[i][2] < 0.3)) continue;
+    L.push(Math.hypot(((p[11][0] + p[12][0]) / 2 - (p[23][0] + p[24][0]) / 2) * W, ((p[11][1] + p[12][1]) / 2 - (p[23][1] + p[24][1]) / 2) * H));
+  }
+  return median(L) / 2 || H * 0.08;
+}
+
+// 1) Hampel:與前後 ±3 幀的中位數差太多(> 3×MAD 且 > 0.15 個人體單位)視為離群 → 丟掉
+function removeOutliers(pts, sw, half = 3, k = 3) {
+  const flag = pts.map((p, i) => {
+    if (!p) return false;
+    const xs = [], ys = [];
+    for (let j = i - half; j <= i + half; j++) if (pts[j]) { xs.push(pts[j].x); ys.push(pts[j].y); }
+    if (xs.length < 4) return false;
+    const mx = median(xs), my = median(ys);
+    const tx = Math.max(k * 1.4826 * median(xs.map(v => Math.abs(v - mx))), 0.15 * sw);
+    const ty = Math.max(k * 1.4826 * median(ys.map(v => Math.abs(v - my))), 0.15 * sw);
+    return Math.abs(p.x - mx) > tx || Math.abs(p.y - my) > ty;
+  });
+  return pts.map((p, i) => (flag[i] ? null : p));
+}
+// 2) 短缺口(≤ maxGap 幀,含被丟掉的離群點)線性內插;更長的缺口保持中斷
+function fillGaps(pts, maxGap = 6) {
+  const out = pts.slice();
+  let i = 0;
+  while (i < out.length) {
+    if (out[i]) { i++; continue; }
+    let j = i; while (j < out.length && !out[j]) j++;
+    const a = out[i - 1], b = out[j];
+    if (a && b && j - i <= maxGap) {
+      for (let m = i; m < j; m++) {
+        const f = (m - i + 1) / (j - i + 1);
+        out[m] = { x: a.x + (b.x - a.x) * f, y: a.y + (b.y - a.y) * f };
+      }
+    }
+    i = j;
+  }
+  return out;
+}
+// 3) One Euro:慢速時強力去抖、快速時放寬截止頻率以免拖尾。離線處理所以前後各跑一次取平均,抵銷延遲
+const euroAlpha = (cut, dt) => 1 / (1 + 1 / (2 * Math.PI * cut) / dt);
+function euroPass(pts, ts, minCut, beta, reverse) {
+  const n = pts.length, out = new Array(n).fill(null);
+  let last = null, dx = 0, dy = 0, li = -1;
+  for (let c = 0; c < n; c++) {
+    const i = reverse ? n - 1 - c : c, p = pts[i];
+    if (!p) { last = null; continue; }
+    if (!last) { last = { x: p.x, y: p.y }; dx = dy = 0; }
+    else {
+      const dt = Math.abs(ts[i] - ts[li]) || 1e-3, ad = euroAlpha(1, dt);
+      dx += ad * ((p.x - last.x) / dt - dx); dy += ad * ((p.y - last.y) / dt - dy);
+      const a = euroAlpha(minCut + beta * Math.hypot(dx, dy), dt);
+      last = { x: last.x + a * (p.x - last.x), y: last.y + a * (p.y - last.y) };
+    }
+    out[i] = last; li = i;
+  }
+  return out;
+}
+function euroSmooth(pts, ts, sw, strength) {
+  const unit = pts.map(p => p && { x: p.x / sw, y: p.y / sw });   // 以人體單位為尺度
+  const minCut = 4 / strength, beta = 1.5;                          // strength 越大 → 截止頻率越低 → 越平滑
+  const f = euroPass(unit, ts, minCut, beta, false), b = euroPass(unit, ts, minCut, beta, true);
+  return unit.map((_, i) => f[i] && b[i] ? { x: (f[i].x + b[i].x) / 2 * sw, y: (f[i].y + b[i].y) / 2 * sw } : null);
+}
+const sampleFps = () => samples.length > 1 ? (samples.length - 1) / (samples[samples.length - 1].t - samples[0].t) : 30;
+function buildTrails() {
+  trails = {};
+  const strength = +$("smooth").value, sw = bodyUnit(), ts = samples.map(s => s.t), fps = sampleFps();
+  for (const k of ["wrist", "elbow", "shoulder", "index"]) {
+    let pts = samples.map(s => keyPoint(s, k));
+    // 視窗以「時間」定義(約 ±0.1 秒檢查離群、補 0.2 秒內的缺口),不同 fps 行為一致
+    if (strength > 0) pts = euroSmooth(fillGaps(removeOutliers(pts, sw, Math.max(3, Math.round(fps * 0.1))), Math.round(fps * 0.2)), ts, sw, strength);
+    trails[k] = pts;
+  }
+}
+const angleAt = (a, b, c) => {            // ∠abc,度
+  const v1 = { x: a.x - b.x, y: a.y - b.y }, v2 = { x: c.x - b.x, y: c.y - b.y };
+  const d = Math.hypot(v1.x, v1.y) * Math.hypot(v2.x, v2.y);
+  return d ? Math.acos(Math.max(-1, Math.min(1, (v1.x * v2.x + v1.y * v2.y) / d))) * 180 / Math.PI : null;
+};
+const r1 = v => v == null ? null : Math.round(v * 10) / 10;
+const r2 = v => v == null ? null : Math.round(v * 100) / 100;
+
+function buildMetrics() {
+  const W = cv.width, H = cv.height, ix = armIdx(), N = samples.length;
+  const sh = trails.shoulder, el = trails.elbow, wr = trails.wrist;
+  const valid = samples.filter(s => s.pose).length;
+
+  const sw = bodyUnit();     // 人體單位(像素)做尺度
+
+  const elbowAng = samples.map((_, i) => sh[i] && el[i] && wr[i] ? angleAt(sh[i], el[i], wr[i]) : null);
+  // 速度用「中央差分」,跨度隨取樣頻率放大(30fps→±1幀、120fps→±3幀),否則高 fps 時相鄰幀位移太小,雜訊會被放大
+  const kk = Math.max(1, Math.round(sampleFps() / 40));
+  const speed = samples.map((_, i) => {
+    const a = wr[i - kk], b = wr[i + kk];
+    return a && b ? dist(a, b) / (samples[i + kk].t - samples[i - kk].t) / sw : null;
+  });
+
+  let rel = 0, maxSp = -1;
+  speed.forEach((v, i) => { if (v != null && v > maxSp) { maxSp = v; rel = i; } });
+  let minIdx = -1, minAng = 999;
+  elbowAng.forEach((v, i) => { if (v != null && i <= rel && v < minAng) { minAng = v; minIdx = i; } });
+
+  const elX = [], elY = [];
+  samples.forEach((_, i) => { if (sh[i] && el[i]) { elX.push((el[i].x - sh[i].x) / sw); elY.push((sh[i].y - el[i].y) / sw); } });
+  const range = a => a.length ? Math.max(...a) - Math.min(...a) : null;
+  const lean = [], mid = [];
+  samples.forEach(s => {
+    if (!s.pose) return;
+    const p = i => ({ x: s.pose[i][0] * W, y: s.pose[i][1] * H });
+    const sm = { x: (p(ix.shoulder).x + p(ix.oShoulder).x) / 2, y: (p(ix.shoulder).y + p(ix.oShoulder).y) / 2 };
+    const hm = { x: (p(ix.hip).x + p(ix.oHip).x) / 2, y: (p(ix.hip).y + p(ix.oHip).y) / 2 };
+    lean.push(Math.atan2(sm.x - hm.x, hm.y - sm.y) * 180 / Math.PI);
+    mid.push(sm.x / sw);
+  });
+  let path = 0;
+  for (let i = 1; i < N; i++) if (wr[i] && wr[i - 1]) path += dist(wr[i], wr[i - 1]);
+
+  const at = (arr, i) => (i >= 0 && i < arr.length ? arr[i] : null);
+  const series = [];
+  const step = Math.max(1, Math.floor(N / 20));
+  for (let i = 0; i < N; i += step) series.push({ 時間秒: r2(samples[i].t), 手肘角度: r1(elbowAng[i]), 手腕速度_身體單位每秒: r2(speed[i]) });
+
+  metrics = {
+    影片秒數: r2(video.duration), 取樣幀數: N, 偵測成功率: valid / N, 品質警告: diagnose(),
+    投擲手: $("arm").value === "right" ? "右手" : "左手",
+    估計出手時間秒: r2(samples[rel]?.t), 估計出手為手腕速度峰值: true,
+    後拉最深時間秒: r2(samples[minIdx]?.t),
+    後拉到出手耗時秒: minIdx >= 0 ? r2(samples[rel].t - samples[minIdx].t) : null,
+    手肘角度_後拉最小值度: minIdx >= 0 ? r1(minAng) : null,
+    手肘角度_出手瞬間度: r1(at(elbowAng, rel)),
+    手肘角度_最大值度: r1(Math.max(...elbowAng.filter(v => v != null))),
+    手腕峰值速度_身體單位每秒: r2(maxSp),
+    手肘相對肩膀水平位移範圍_身體單位: r2(range(elX)),
+    手肘相對肩膀垂直位移範圍_身體單位: r2(range(elY)),
+    出手瞬間手肘高於肩膀_身體單位: elY.length && sh[rel] && el[rel] ? r2((sh[rel].y - el[rel].y) / sw) : null,
+    軀幹傾斜角範圍度: r1(range(lean)),
+    肩線中點水平晃動_身體單位: r2(range(mid)),
+    手腕軌跡總長_身體單位: r2(path / sw),
+    時間序列: series,
+  };
+  // 供取關鍵幀
+  metrics._keyTimes = [0, samples[minIdx]?.t, Math.max(0, (samples[rel]?.t ?? 0) - 0.1), samples[rel]?.t,
+    Math.min(video.duration - 0.05, (samples[rel]?.t ?? 0) + 0.15), samples[N - 1].t].filter(t => t != null);
+}
+
+// ---- 繪製 ----
+const SKELETON = PoseLandmarker.POSE_CONNECTIONS.filter(c => c.start >= 11 && c.end >= 11 && c.start <= 28 && c.end <= 28);
+function currentIdx() {
+  if (!samples.length) return -1;
+  const i = Math.round(video.currentTime * (samples.length / video.duration));
+  return Math.max(0, Math.min(samples.length - 1, i));
+}
+function draw() {
+  if (!video.videoWidth) return;
+  const W = cv.width, H = cv.height, lw = Math.max(2, W / 300);
+  ctx.drawImage(video, 0, 0, W, H);
+  const i = currentIdx();
+  if (i < 0) return;
+
+  if ($("tGrid").checked) {
+    ctx.strokeStyle = "rgba(255,255,255,.25)"; ctx.lineWidth = 1; ctx.beginPath();
+    for (let g = 1; g < 8; g++) { ctx.moveTo(W * g / 8, 0); ctx.lineTo(W * g / 8, H); ctx.moveTo(0, H * g / 8); ctx.lineTo(W, H * g / 8); }
+    ctx.stroke();
+  }
+  if ($("tRef").checked) {
+    const j = trails.shoulder.findIndex(p => p);
+    if (j >= 0) {
+      const p = trails.shoulder[j];
+      ctx.setLineDash([lw * 4, lw * 3]); ctx.strokeStyle = "rgba(255,255,255,.7)"; ctx.lineWidth = lw / 1.5;
+      ctx.beginPath(); ctx.moveTo(p.x, 0); ctx.lineTo(p.x, H); ctx.moveTo(0, p.y); ctx.lineTo(W, p.y); ctx.stroke();
+      ctx.setLineDash([]);
+    }
+  }
+  const s = samples[i];
+  if ($("tSkel").checked && s.pose) {
+    ctx.strokeStyle = "rgba(255,255,255,.75)"; ctx.lineWidth = lw; ctx.lineCap = "round";
+    for (const c of SKELETON) {
+      const a = s.pose[c.start], b = s.pose[c.end];
+      if (a[2] < 0.3 || b[2] < 0.3) continue;
+      ctx.beginPath(); ctx.moveTo(a[0] * W, a[1] * H); ctx.lineTo(b[0] * W, b[1] * H); ctx.stroke();
+    }
+  }
+  // 軌跡長度:長影片常含多次投擲,全部疊在一起會變成一團。預設只畫最近 1 秒,越舊越淡
+  const lenSel = $("trailLen").value, full = lenSel === "all";
+  const start = full ? 0 : Math.max(0, i - Math.max(2, Math.round(+lenSel * sampleFps())));
+  const end = full ? samples.length - 1 : i, CH = full ? 1 : 6, per = Math.max(1, Math.ceil((end - start) / CH));
+  for (const [k, id] of [["shoulder", "tShoulder"], ["elbow", "tElbow"], ["wrist", "tWrist"], ["index", "tIndex"]]) {
+    if (!$(id).checked) continue;
+    const arr = trails[k];
+    ctx.strokeStyle = COLORS[k]; ctx.lineWidth = lw * 1.3; ctx.lineJoin = "round";
+    for (let c = 0; c < CH; c++) {
+      const a = start + c * per, b = Math.min(end, a + per);
+      if (a > end) break;
+      ctx.globalAlpha = full ? 1 : 0.15 + 0.85 * (c + 1) / CH;
+      ctx.beginPath(); let pen = false;
+      for (let j = a; j <= b; j++) {
+        const p = arr[j];
+        if (!p) { pen = false; continue; }
+        if (!pen) { ctx.moveTo(p.x, p.y); pen = true; } else ctx.lineTo(p.x, p.y);
+      }
+      ctx.stroke();
+    }
+    ctx.globalAlpha = 1;
+    const cur = arr[i];
+    if (cur) { ctx.fillStyle = COLORS[k]; ctx.beginPath(); ctx.arc(cur.x, cur.y, lw * 2.2, 0, 7); ctx.fill(); }
+  }
+}
+let raf = 0;
+function loop() { draw(); updateSeek(); if (!video.paused && !video.ended) raf = requestAnimationFrame(loop); else { $("play").textContent = "播放"; } }
+function updateSeek() { if (video.duration) $("seek").value = Math.round(video.currentTime / video.duration * 1000); }
+
+$("play").addEventListener("click", () => {
+  if (!video.paused) { video.pause(); return; }
+  if (video.ended || video.currentTime >= video.duration - 0.05) video.currentTime = 0;
+  video.playbackRate = +$("rate").value;
+  video.play().then(() => { $("play").textContent = "暫停"; loop(); });
+});
+$("rate").addEventListener("change", () => { video.playbackRate = +$("rate").value; });
+$("seek").addEventListener("input", () => { video.currentTime = $("seek").value / 1000 * video.duration; });
+video.addEventListener("seeked", () => { if (!analyzing) draw(); });
+for (const id of ["tSkel", "tWrist", "tElbow", "tShoulder", "tIndex", "tGrid", "tRef", "trailLen"]) $(id).addEventListener("change", draw);
+$("smooth").addEventListener("input", () => {
+  $("smoothVal").textContent = $("smooth").value === "0" ? "關" : $("smooth").value;
+  if (samples.length) { buildTrails(); buildMetrics(); draw(); }
+});
+$("arm").addEventListener("change", () => { if (samples.length) { buildTrails(); buildMetrics(); draw(); renderWarn(); } });
+
+// ---- 匯出疊圖影片 ----
+$("export").addEventListener("click", async () => {
+  if (exporting || !samples.length) return;
+  const mime = ["video/mp4;codecs=avc1", "video/webm;codecs=vp9", "video/webm"].find(m => window.MediaRecorder && MediaRecorder.isTypeSupported(m));
+  if (!mime) return setStatus("st2", "此瀏覽器不支援匯出錄影。", true);
+  exporting = true; $("export").disabled = true;
+  setStatus("st2", "錄製中,請保持此分頁在前景…(依播放速度,慢動作會花較久)");
+  const rec = new MediaRecorder(cv.captureStream(30), { mimeType: mime, videoBitsPerSecond: 6e6 });
+  const chunks = [];
+  rec.ondataavailable = e => e.data.size && chunks.push(e.data);
+  rec.onstop = () => {
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(new Blob(chunks, { type: mime }));
+    a.download = "motion-trace." + (mime.startsWith("video/mp4") ? "mp4" : "webm");
+    a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 5000);
+    exporting = false; $("export").disabled = false; setStatus("st2", "已匯出。");
+  };
+  video.pause(); await seekTo(0); video.playbackRate = +$("rate").value;
+  rec.start();
+  video.onended = () => { rec.stop(); video.onended = null; };
+  await video.play(); loop();
+});
+
+// ---- Gemini ----
+const modelSel = $("model");
+function fillModels(list, keep) {
+  modelSel.innerHTML = "";
+  for (const m of list) { const o = document.createElement("option"); o.value = o.textContent = m; modelSel.appendChild(o); }
+  if (keep && list.includes(keep)) modelSel.value = keep;
+  else if (list.includes(FALLBACK_MODELS[0])) modelSel.value = FALLBACK_MODELS[0];
+}
+fillModels(FALLBACK_MODELS);
+
+function updateAdviseBtn() { $("advise").disabled = !(metrics && $("key").value.trim()); $("loadModels").disabled = !$("key").value.trim(); }
+$("key").addEventListener("input", updateAdviseBtn);
+
+$("loadModels").addEventListener("click", async () => {
+  setStatus("st3", "載入模型清單中…");
+  try {
+    const r = await fetch(`${GEMINI}/models?pageSize=200`, { headers: { "x-goog-api-key": $("key").value.trim() } });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error?.message || r.status);
+    const bad = /embed|tts|image|imagen|veo|live|audio|aqa|robotics|computer-use|native|learnlm|gemma|thinking-exp/i;
+    const list = (j.models || [])
+      .filter(m => m.supportedGenerationMethods?.includes("generateContent") && /^models\/gemini/.test(m.name) && !bad.test(m.name))
+      .map(m => m.name.replace("models/", ""))
+      .sort((a, b) => b.localeCompare(a));
+    if (!list.length) throw new Error("找不到可用的 Gemini 模型");
+    fillModels(list, modelSel.value);
+    setStatus("st3", `已載入 ${list.length} 個可用模型。`);
+  } catch (e) { setStatus("st3", "載入模型失敗:" + e.message, true); }
+});
+
+async function frameJpeg(t) {
+  await seekTo(t); await nextFrame(); draw();
+  const max = 768, sc = Math.min(1, max / cv.width);
+  const c = document.createElement("canvas");
+  c.width = Math.round(cv.width * sc); c.height = Math.round(cv.height * sc);
+  c.getContext("2d").drawImage(cv, 0, 0, c.width, c.height);
+  return c.toDataURL("image/jpeg", 0.8);
+}
+
+$("advise").addEventListener("click", async () => {
+  const key = $("key").value.trim(), model = modelSel.value;
+  $("advise").disabled = true; $("advice").innerHTML = ""; $("frames").innerHTML = "";
+  const resumeAt = video.currentTime; video.pause();
+  try {
+    setStatus("st3", "擷取關鍵幀…");
+    const times = [...new Set(metrics._keyTimes.map(t => +t.toFixed(2)))].sort((a, b) => a - b);
+    const imgs = [];
+    for (const t of times) {
+      const url = await frameJpeg(t);
+      imgs.push({ t, url });
+      const im = new Image(); im.src = url; im.title = t + "s"; $("frames").appendChild(im);
+    }
+    await seekTo(resumeAt); draw();
+
+    const { _keyTimes, ...pub } = metrics;
+    const sport = $("sport").value.trim() || "投擲動作", angle = $("angle").value, extra = $("ctx").value.trim();
+    $("metricsPre").textContent = JSON.stringify(pub, null, 2); $("metricsBox").hidden = false;
+
+    const prompt = `你是一位經驗豐富的「${sport}」教練與運動生物力學分析師。請用繁體中文,針對使用者的動作給出具體、可執行的修改建議。
+
+【背景】
+- 拍攝角度:${angle}
+- 使用者補充:${extra || "(無)"}
+- 附圖是依時間順序擷取的關鍵幀(時間依序為 ${imgs.map(i => i.t + "s").join("、")}),圖上已疊畫骨架與軌跡:紅=手腕、黃=手肘、綠=肩膀、藍=食指。
+- 下面的 JSON 是由姿勢辨識(MediaPipe)估算的量化數據。長度單位為「身體單位」(軀幹長的一半,約等於正面肩寬;不受拍攝角度影響);「估計出手時間」是用手腕速度峰值推測,可能與真實放手瞬間有誤差。
+
+【量化數據】
+${JSON.stringify(pub)}
+
+【請依以下結構輸出(Markdown)】
+### 整體評價
+2~3 句,先肯定做得好的地方。
+### 動作階段分析
+依序說明:準備/瞄準 → 後拉 → 加速出手 → 跟隨動作,每階段觀察到什麼,並引用具體數據或畫面。
+### 最需要改進的 3 件事
+依優先順序,每項包含:現象(附數據依據)、為什麼影響準度或穩定性、怎麼修正。
+### 練習建議
+2~4 個具體練習(含次數或做法),以及一個自我檢查的口訣或提示。
+### 下次拍攝建議
+說明怎麼拍可以讓分析更準(角度、fps、入鏡範圍)。
+
+【注意】
+- 姿勢辨識有誤差,資料不足或不可信時要明講,不要過度推論;拍攝角度會影響哪些指標可信。
+- 不要編造圖上或數據中看不到的資訊。
+- 若「品質警告」不是空的,請在「整體評價」開頭先說明這些問題會讓分析可信度下降,並降低結論的確定語氣。
+- 語氣像教練,具體、友善,避免空泛的話。`;
+
+    setStatus("st3", `呼叫 ${model} 分析中…`);
+    const parts = [{ text: prompt }, ...imgs.map(i => ({ inlineData: { mimeType: "image/jpeg", data: i.url.split(",")[1] } }))];
+    const r = await fetch(`${GEMINI}/models/${encodeURIComponent(model)}:generateContent`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "x-goog-api-key": key },
+      body: JSON.stringify({ contents: [{ role: "user", parts }], generationConfig: { temperature: 0.4 } }),
+    });
+    const j = await r.json();
+    if (!r.ok) throw new Error(j.error?.message || `HTTP ${r.status}`);
+    const text = (j.candidates?.[0]?.content?.parts || []).map(p => p.text || "").join("");
+    if (!text) throw new Error(j.promptFeedback?.blockReason ? "內容被擋下:" + j.promptFeedback.blockReason : "模型沒有回傳內容");
+    $("advice").innerHTML = md(text);
+    setStatus("st3", "完成。");
+  } catch (e) {
+    setStatus("st3", "失敗:" + e.message, true);
+  } finally { updateAdviseBtn(); }
+});
+
+// 極簡 Markdown(先跳脫 HTML,避免注入)
+function md(src) {
+  const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+  const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`(.+?)`/g, "<code>$1</code>");
+  let html = "", list = null;
+  const close = () => { if (list) { html += `</${list}>`; list = null; } };
+  for (const line of src.split("\n")) {
+    let m;
+    if ((m = line.match(/^#{1,4}\s+(.*)/))) { close(); html += `<h3>${inline(m[1])}</h3>`; }
+    else if ((m = line.match(/^\s*[-*]\s+(.*)/))) { if (list !== "ul") { close(); html += "<ul>"; list = "ul"; } html += `<li>${inline(m[1])}</li>`; }
+    else if ((m = line.match(/^\s*\d+[.)]\s+(.*)/))) { if (list !== "ol") { close(); html += "<ol>"; list = "ol"; } html += `<li>${inline(m[1])}</li>`; }
+    else if (!line.trim()) close();
+    else { close(); html += `<p>${inline(line)}</p>`; }
+  }
+  close(); return html;
+}
+</script>
+</body>
+</html>
