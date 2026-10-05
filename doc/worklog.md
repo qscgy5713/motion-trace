@@ -1,6 +1,6 @@
 # Motion Trace 工作紀錄(給後續接手的人 / agent)
 
-最後更新:2026-10-05。專案:`/Users/yujuchen/www/motion-trace`(repo:`github.com/qscgy5713/motion-trace`,分支 `master`)。
+最後更新:2026-10-05(git 狀態截至 `137d3c7`)。專案:`/Users/yujuchen/www/motion-trace`(repo:`github.com/qscgy5713/motion-trace`,分支 `master`)。
 
 ## 1. 專案是什麼
 
@@ -26,8 +26,12 @@
 | `README.md` | 使用說明 |
 | `doc/worklog.md` | 本檔 |
 
-- 最後一次 commit:`52d8694`(骨長過濾、軌跡長度選項、120fps/幀率偵測、模型選項、品質提醒等)。
-- **之後的修改尚未 commit**:骨長檢查改成逐幀(見 §5.4)、軌跡不再整條消失、LaTeX 轉純文字、`<ol start>`/`<hr>` 排版、白話教練提示詞(練習放最後)、「追蹤過濾」嚴格/寬鬆/關閉選單。請先問使用者再 commit。
+- 目前所有改動都已 commit 並推到 `origin/master`;最後一次 commit:`137d3c7`。
+- commit 歷史:
+  - `073324b`:第一版(姿勢+手部追蹤、軌跡、慢動作、匯出、Gemini)
+  - `52d8694`:骨長過濾、軌跡長度選項、120fps/幀率偵測、模型選項、品質提醒、背景分頁不卡住
+  - `137d3c7`:逐幀骨長檢查、軌跡不整條消失、追蹤過濾(嚴格/寬鬆/關閉)、Gemini LaTeX 轉換與白話教練提示詞、README、本檔
+- 之後若再有修改,請先問使用者再 commit / push(見 §2)。
 
 ## 4. 程式架構(`index.html`)
 
