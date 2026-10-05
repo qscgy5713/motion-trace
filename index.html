@@ -48,6 +48,7 @@
   #advice { line-height: 1.75; }
   #advice h3, #advice h4 { margin: 18px 0 6px; font-size: 16px; color: var(--accent); }
   #advice ul, #advice ol { padding-left: 22px; margin: 6px 0; }
+  #advice hr { border: 0; border-top: 1px solid var(--line); margin: 14px 0; }
   #advice code { background: #0f1115; padding: 1px 5px; border-radius: 4px; }
   #frames { display: flex; gap: 8px; overflow-x: auto; margin-top: 10px; }
   #frames img { height: 90px; border-radius: 6px; border: 1px solid var(--line); }
@@ -133,7 +134,13 @@
       </label>
     </div>
     <div class="row">
-      <label><input type="checkbox" id="tBone" checked> 過濾不合理的骨長(關節被誤判到背景/別處時不畫,建議開啟)</label>
+      <label>追蹤過濾
+        <select id="boneMode" style="width:auto">
+          <option value="strict" selected>嚴格(線乾淨,但手被擋住時會中斷)</option>
+          <option value="loose">寬鬆(手被擋住時也盡量畫手腕,但會比較抖)</option>
+          <option value="off">關閉(完全不過濾)</option>
+        </select>
+      </label>
     </div>
     <div class="note">0 = 原始資料;數字越大軌跡越平順(同時會自動剔除突然跳掉的離群點)。強度太高會把真正的快速動作磨平。</div>
     <div class="status" id="st2"></div>
@@ -482,39 +489,49 @@ function dropShortRuns(pts, minLen) {
 // 骨長合理性:同一個人的軀幹、上臂、前臂長度(2D 投影)在整支影片應該大致固定。
 // 某一幀的長度偏離中位數太多(上臂 < 0.45× / 前臂 < 0.4× / 任一 > 1.5×),代表關節被誤判到別處(背景、頭髮、另一隻手…),該幀的相關關節不採用。
 let bone = { okT: null, okU: null, okF: null };   // null = 不過濾
-function boneMask() {
-  const W = cv.width, H = cv.height, ix = armIdx(), MV = 0.1;
+function boneMask(mode = "strict") {
+  const W = cv.width, H = cv.height, ix = armIdx(), STRONG = 0.1;
   const px = (p, i) => [p[i][0] * W, p[i][1] * H], len = (a, b) => Math.hypot(a[0] - b[0], a[1] - b[1]);
   const mid = (a, b) => [(a[0] + b[0]) / 2, (a[1] + b[1]) / 2];
-  const tor = [], up = [], fo = [];
+  // 「標準骨長」只從可信度夠高的幀取中位數;「逐幀檢查」則對所有可用幀做(可見度只要過 VIS_MIN)。
+  // 投擲出手時手肘常被擋住、可信度 < 0.1,但位置其實合理;若連檢查都要求高可信度,出手那段會整個被丟掉
+  const L = { tor: [], up: [], fo: [], reach: [] }, strong = { tor: [], up: [], fo: [] };
   for (const s of samples) {
     const p = s.pose;
-    if (!p) { tor.push(NaN); up.push(NaN); fo.push(NaN); continue; }
-    const ok = (...ids) => ids.every(i => p[i][2] > MV);
-    tor.push(ok(ix.shoulder, ix.oShoulder, ix.hip, ix.oHip) ? len(mid(px(p, ix.shoulder), px(p, ix.oShoulder)), mid(px(p, ix.hip), px(p, ix.oHip))) : NaN);
-    up.push(ok(ix.shoulder, ix.elbow) ? len(px(p, ix.shoulder), px(p, ix.elbow)) : NaN);
-    fo.push(ok(ix.elbow, ix.wrist) ? len(px(p, ix.elbow), px(p, ix.wrist)) : NaN);
+    const put = (k, ids, f) => {
+      const v = p && ids.every(i => p[i][2] > VIS_MIN) ? f() : NaN;
+      L[k].push(v); strong[k].push(Number.isFinite(v) && ids.every(i => p[i][2] > STRONG));
+    };
+    put("tor", [ix.shoulder, ix.oShoulder, ix.hip, ix.oHip], () => len(mid(px(p, ix.shoulder), px(p, ix.oShoulder)), mid(px(p, ix.hip), px(p, ix.oHip))));
+    put("up", [ix.shoulder, ix.elbow], () => len(px(p, ix.shoulder), px(p, ix.elbow)));
+    put("fo", [ix.elbow, ix.wrist], () => len(px(p, ix.elbow), px(p, ix.wrist)));
+    L.reach.push(p && p[ix.shoulder][2] > VIS_MIN && p[ix.wrist][2] > VIS_MIN ? len(px(p, ix.shoulder), px(p, ix.wrist)) : NaN);   // 肩→腕距離
   }
-  const med = a => median(a.filter(Number.isFinite));
-  // 某段骨長完全沒有可用資料(例如髖部出鏡的半身影片)時,不拿它過濾,避免整個關節被清空
-  const has = a => a.some(Number.isFinite), mt = med(tor), mu = med(up), mf = med(fo);
+  const ref = k => median(L[k].filter((v, i) => strong[k][i]));
+  const has = k => strong[k].some(Boolean);          // 完全沒有可信資料(例如髖部出鏡的半身影片)就不拿這段骨長過濾
   const inr = (v, m, lo, hi) => Number.isFinite(v) && v > lo * m && v < hi * m;
+  const mt = ref("tor"), mu = ref("up"), mf = ref("fo");
   // 下限放寬到 0.4~0.45:手臂朝鏡頭或遠離鏡頭時 2D 投影會自然縮短,出手瞬間尤其明顯,不能誤砍
-  const okT = has(tor) ? tor.map(v => inr(v, mt, 0.7, 1.3)) : tor.map(() => true);
-  const okU = has(up) ? up.map((v, i) => okT[i] && inr(v, mu, 0.45, 1.5)) : okT.slice();
-  const okF = has(fo) ? fo.map((v, i) => okU[i] && inr(v, mf, 0.4, 1.5)) : okU.slice();
-  return { okT, okU, okF };
+  const okT = has("tor") ? L.tor.map(v => inr(v, mt, 0.7, 1.3)) : L.tor.map(() => true);
+  const okU = has("up") ? L.up.map((v, i) => okT[i] && inr(v, mu, 0.45, 1.5)) : okT.slice();
+  const okF = has("fo") ? L.fo.map((v, i) => okU[i] && inr(v, mf, 0.4, 1.5)) : okU.slice();
+  if (mode !== "loose") return { okT, okU, okF };
+  // 寬鬆:手腕不要求手肘合理(回拉時手肘常被頭/身體擋住、位置亂猜),只要「肩→腕距離」不超過手臂總長就採用。
+  // 代價:這段手腕本身也不準,線會抖,所以預設用嚴格
+  const reach = (has("up") && has("fo")) ? 1.15 * (mu + mf) : Infinity;
+  const okW = L.reach.map((d, i) => okT[i] && Number.isFinite(d) && d <= reach);
+  return { okT, okU, okF: okW };
 }
 function buildTrails() {
   trails = {};
   const strength = +$("smooth").value, sw = bodyUnit(), ts = samples.map(s => s.t), fps = sampleFps();
-  bone = $("tBone").checked ? boneMask() : { okT: null, okU: null, okF: null };
+  bone = $("boneMode").value === "off" ? { okT: null, okU: null, okF: null } : boneMask($("boneMode").value);
   const gate = { shoulder: bone.okT, elbow: bone.okU, wrist: bone.okF, index: bone.okF };
   for (const k of ["wrist", "elbow", "shoulder", "index"]) {
     let pts = samples.map((s, i) => (gate[k] && !gate[k][i] ? null : keyPoint(s, k)));
-    // 視窗以「時間」定義,不同 fps 行為一致。只補約 0.07 秒內(1~2 幀)的小缺口;
+    // 視窗以「時間」定義,不同 fps 行為一致。只補約 0.1 秒內(約 3 幀)的小缺口;
     // 沒追蹤到的地方保持空白(不內插、不畫線),太短的零碎片段(< 約 0.1 秒)也視為雜訊丟掉
-    if (strength > 0) pts = euroSmooth(fillGaps(removeOutliers(pts, sw, Math.max(3, Math.round(fps * 0.1))), Math.max(1, Math.round(fps * 0.07))), ts, sw, strength);
+    if (strength > 0) pts = euroSmooth(fillGaps(removeOutliers(pts, sw, Math.max(3, Math.round(fps * 0.1))), Math.max(1, Math.round(fps * 0.1))), ts, sw, strength);
     trails[k] = dropShortRuns(pts, Math.max(3, Math.round(fps * 0.1)));
   }
 }
@@ -637,7 +654,6 @@ function draw() {
   for (const [k, id] of [["shoulder", "tShoulder"], ["elbow", "tElbow"], ["wrist", "tWrist"], ["index", "tIndex"]]) {
     if (!$(id).checked) continue;
     const arr = trails[k];
-    if (!arr[i]) continue;                 // 這一幀沒追蹤到這個關節:整條軌跡和圓點都不畫
     ctx.strokeStyle = COLORS[k]; ctx.lineWidth = lw * 1.3; ctx.lineJoin = "round";
     for (let c = 0; c < CH; c++) {
       const a = start + c * per, b = Math.min(end, a + per);
@@ -674,7 +690,7 @@ $("smooth").addEventListener("input", () => {
   $("smoothVal").textContent = $("smooth").value === "0" ? "關" : $("smooth").value;
   if (samples.length) { buildTrails(); buildMetrics(); draw(); }
 });
-$("tBone").addEventListener("change", () => { if (samples.length) { buildTrails(); buildMetrics(); draw(); } });
+$("boneMode").addEventListener("change", () => { if (samples.length) { buildTrails(); buildMetrics(); draw(); } });
 $("arm").addEventListener("change", () => { if (samples.length) { buildTrails(); buildMetrics(); draw(); renderWarn(); } });
 
 // ---- 匯出疊圖影片 ----
@@ -758,34 +774,39 @@ $("advise").addEventListener("click", async () => {
     const sport = $("sport").value.trim() || "投擲動作", angle = $("angle").value, extra = $("ctx").value.trim();
     $("metricsPre").textContent = JSON.stringify(pub, null, 2); $("metricsBox").hidden = false;
 
-    const prompt = `你是一位經驗豐富的「${sport}」教練與運動生物力學分析師。請用繁體中文,針對使用者的動作給出具體、可執行的修改建議。
+    const prompt = `你是一位親切又有經驗的「${sport}」教練,正在球場邊指導玩家。請用繁體中文、像教練在旁邊口頭指導的方式回答,不要像在寫研究報告。
 
 【背景】
 - 拍攝角度:${angle}
-- 使用者補充:${extra || "(無)"}
-- 附圖是依時間順序擷取的關鍵幀(時間依序為 ${imgs.map(i => i.t + "s").join("、")}),圖上已疊畫骨架與軌跡:紅=手腕、黃=手肘、綠=肩膀、藍=食指。
-- 下面的 JSON 是由姿勢辨識(MediaPipe)估算的量化數據。長度單位為「身體單位」(軀幹長的一半,約等於正面肩寬;不受拍攝角度影響);「估計出手時間」是用手腕速度峰值推測,可能與真實放手瞬間有誤差。
+- 玩家補充:${extra || "(無)"}
+- 附圖是依時間順序擷取的幾個畫面(${imgs.map(i => i.t + "s").join("、")}),圖上的線是電腦追蹤的結果:紅=手腕、黃=手肘、綠=肩膀、藍=食指。
+- 下面的數據是電腦估算的,只供你判斷用,不要直接念給玩家聽。估算有誤差,出手瞬間尤其不準。
 
-【量化數據】
+【數據(僅供你參考)】
 ${JSON.stringify(pub)}
 
-【請依以下結構輸出(Markdown)】
-### 整體評價
-2~3 句,先肯定做得好的地方。
-### 動作階段分析
-依序說明:準備/瞄準 → 後拉 → 加速出手 → 跟隨動作,每階段觀察到什麼,並引用具體數據或畫面。
-### 最需要改進的 3 件事
-依優先順序,每項包含:現象(附數據依據)、為什麼影響準度或穩定性、怎麼修正。
-### 練習建議
-2~4 個具體練習(含次數或做法),以及一個自我檢查的口訣或提示。
-### 下次拍攝建議
-說明怎麼拍可以讓分析更準(角度、fps、入鏡範圍)。
+【請照這個格式回答(Markdown),整篇控制在 350~500 字】
+### 整體感覺
+2 句話。先講一個優點。
+### 先改這 1~2 件事
+最多 2 件。每件用這個寫法:
+- **現在**:用一句話描述你「看到」的動作(例如「出手前手肘會往上抬」)。
+- **改成**:一個玩家馬上能照做、也能自己檢查有沒有做到的調整(例如「手肘固定在肩膀下面一點的位置不動,只用小臂把飛鏢送出去」)。
+### 下次拍攝小提醒
+一句話。
+### 練習方式(放在最後)
+針對上面「先改」的每一件事,各給 1 個對應的練習(最多 2 個)。每個寫清楚:怎麼做、做幾次或做多久、做到什麼感覺就算對了。可以是不丟飛鏢也能做的動作(例如對著鏡子、空揮)。
 
-【注意】
-- 姿勢辨識有誤差,資料不足或不可信時要明講,不要過度推論;拍攝角度會影響哪些指標可信。
-- 不要編造圖上或數據中看不到的資訊。
-- 若「品質警告」不是空的,請在「整體評價」開頭先說明這些問題會讓分析可信度下降,並降低結論的確定語氣。
-- 語氣像教練,具體、友善,避免空泛的話。`;
+【規則】
+- **完全不要**出現「角度」「度數」「°」「速度」「位移」「身體單位」「峰值」這類詞,也不要列任何數字或數據。
+- 所有調整都用「身體位置、方向、可以看到或感覺到的動作」來描述,讓玩家知道要往哪裡調、調多少:
+  - 好:「手肘再抬高一點,大概跟肩膀差不多高」「出手後手指順著飛鏢的方向指向靶心」「站穩,出手時肩膀不要跟著晃」
+  - 不好:「手肘角度要從 113 度增加到 130 度」「手腕速度偏低」
+- 每個建議都要是玩家看鏡子、或下次拍影片時,能自己檢查有沒有做到的。
+- 一次只講重點,不要把所有觀察都講完。
+- 純文字輸出,不要用 LaTeX 或 $ 符號。
+- 看不到或不確定的東西不要硬猜;如果「品質警告」不是空的,第一句先用白話說明「這支影片拍攝條件有點限制,以下建議僅供參考」。
+- 語氣友善、鼓勵,不要說教。`;
 
     setStatus("st3", `呼叫 ${model} 分析中…`);
     const parts = [{ text: prompt }, ...imgs.map(i => ({ inlineData: { mimeType: "image/jpeg", data: i.url.split(",")[1] } }))];
@@ -805,8 +826,21 @@ ${JSON.stringify(pub)}
   } finally { updateAdviseBtn(); }
 });
 
+// 模型偶爾仍會輸出 LaTeX($113.9^\circ$、$1.14$),這裡的排版器不支援,轉成純文字
+function delatex(src) {
+  return src.replace(/\$([^$\n]{1,60}?)\$/g, (m, inner) => {
+    // 只有「含 \ 或 ^」或「純數字」才當成數學式;其他(例如 $5-$10 的貨幣金額)不動
+    if (/^\s|\s$/.test(inner) || !(/[\\^]/.test(inner) || /^\d+(\.\d+)?$/.test(inner))) return m;
+    return inner
+      .replace(/\^\s*\{?\s*\\circ\s*\}?/g, "°").replace(/\\circ/g, "°")
+      .replace(/\\(?:sim|approx)/g, "~").replace(/\\times/g, "×").replace(/\\%/g, "%")
+      .replace(/\\(?:text|mathrm|mathbf)\{([^}]*)\}/g, "$1").replace(/\\[,;! ]/g, " ")
+      .replace(/\\([a-zA-Z]+)/g, "").replace(/[{}]/g, "").trim();
+  });
+}
 // 極簡 Markdown(先跳脫 HTML,避免注入)
 function md(src) {
+  src = delatex(src);
   const esc = s => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
   const inline = s => esc(s).replace(/\*\*(.+?)\*\*/g, "<strong>$1</strong>").replace(/`(.+?)`/g, "<code>$1</code>");
   let html = "", list = null;
@@ -815,7 +849,8 @@ function md(src) {
     let m;
     if ((m = line.match(/^#{1,4}\s+(.*)/))) { close(); html += `<h3>${inline(m[1])}</h3>`; }
     else if ((m = line.match(/^\s*[-*]\s+(.*)/))) { if (list !== "ul") { close(); html += "<ul>"; list = "ul"; } html += `<li>${inline(m[1])}</li>`; }
-    else if ((m = line.match(/^\s*\d+[.)]\s+(.*)/))) { if (list !== "ol") { close(); html += "<ol>"; list = "ol"; } html += `<li>${inline(m[1])}</li>`; }
+    else if ((m = line.match(/^\s*(\d+)[.)]\s+(.*)/))) { if (list !== "ol") { close(); html += `<ol start="${m[1]}">`; list = "ol"; } html += `<li>${inline(m[2])}</li>`; }
+    else if (/^\s*(-{3,}|\*{3,}|_{3,})\s*$/.test(line)) { close(); html += "<hr>"; }
     else if (!line.trim()) close();
     else { close(); html += `<p>${inline(line)}</p>`; }
   }
