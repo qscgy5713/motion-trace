@@ -1,6 +1,6 @@
 # Motion Trace 工作紀錄(給後續接手的人 / agent)
 
-最後更新:2026-10-05(git 狀態截至 `113e85b`)。專案:`/Users/yujuchen/www/motion-trace`(repo:`github.com/qscgy5713/motion-trace`,分支 `master`)。
+最後更新:2026-10-05。專案:`/Users/yujuchen/www/motion-trace`(repo:`github.com/qscgy5713/motion-trace`,分支 `master`)。
 
 ## 1. 專案是什麼
 
@@ -27,13 +27,16 @@
 | `doc/worklog.md` | 本檔 |
 | `deploy.sh` | 上傳 `index.html` 到線上主機 |
 
-- 目前所有改動都已 commit 並推到 `origin/master`;最後一次 commit:`113e85b`。
-- commit 歷史:
+- 最新狀態以 `git log` 為準。本檔**不寫自己這個 commit 的編號**(commit 前不可能知道,硬寫會讓文件永遠落後一個 commit)。
+- **維護規則**:每次 commit 之前先更新本檔,讓文件與程式碼進同一個 commit(使用者明確要求)。
+- commit 歷史(依序,內容摘要):
   - `073324b`:第一版(姿勢+手部追蹤、軌跡、慢動作、匯出、Gemini)
   - `52d8694`:骨長過濾、軌跡長度選項、120fps/幀率偵測、模型選項、品質提醒、背景分頁不卡住
   - `137d3c7`:逐幀骨長檢查、軌跡不整條消失、追蹤過濾(嚴格/寬鬆/關閉)、Gemini LaTeX 轉換與白話教練提示詞、README、本檔
-  - `5fd79f0`:更新本檔 git 狀態
   - `113e85b`:手部放大追蹤(全畫面沒抓到手時裁切放大再偵測、手部點取代姿勢手腕、手部佐證繞過骨長閘門)
+  - `a9f468e`:`deploy.sh` 與部署文件(首次部署到 https://motion-trace.duckdns.org/)
+  - (中間 `5fd79f0`、`701d2b3` 只是更新本檔的 git 狀態,屬於上述「推完才補文件」的舊做法)
+- 相關的另一個 repo `/Users/yujuchen/www/Caddy`(`qscgy5713/Caddy`):`f1dcb94` 新增 `sites/motion-trace.caddy`。
 - 之後若再有修改,請先問使用者再 commit / push(見 §2)。
 
 ## 3.1 部署
